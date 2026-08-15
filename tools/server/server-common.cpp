@@ -1049,6 +1049,59 @@ json oaicompat_completion_params_parse(const json & body) {
     return llama_params;
 }
 
+// load media data from a URL (same logic as handle_media but returns the data)
+static bool load_media_data(const std::string & url, const std::string & media_path, raw_buffer & out_data) {
+    if (!media_path.empty()) {
+        GGML_ASSERT(media_path.back() == DIRECTORY_SEPARATOR);
+    }
+
+    if (string_starts_with(url, "http")) {
+        common_remote_params params;
+        params.max_size = 1024 * 1024 * 10;
+        params.timeout  = 10;
+        SRV_INF("downloading media from '%s'\n", url.c_str());
+        auto res = common_remote_get_content(url, params);
+        if (200 <= res.first && res.first < 300) {
+            out_data.insert(out_data.end(), res.second.begin(), res.second.end());
+            return true;
+        }
+        return false;
+
+    } else if (string_starts_with(url, "file://")) {
+        if (media_path.empty()) {
+            return false;
+        }
+        std::string file_path = url.substr(7);
+        if (!fs_validate_filename(file_path, true)) {
+            return false;
+        }
+        SRV_INF("loading media from local file '%s'\n", (media_path + file_path).c_str());
+        std::ifstream file(media_path + file_path, std::ios::binary);
+        if (!file) {
+            return false;
+        }
+        out_data.assign((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+        return true;
+
+    } else if (string_starts_with(url, "data:")) {
+        std::vector<std::string> parts = string_split<std::string>(url, ',');
+        if (parts.size() != 2) {
+            return false;
+        }
+        auto decoded_data = base64_decode(parts[1]);
+        out_data.insert(out_data.end(), decoded_data.begin(), decoded_data.end());
+        return !out_data.empty();
+
+    } else {
+        auto decoded_data = base64_decode(url);
+        if (decoded_data.empty()) {
+            return false;
+        }
+        out_data.insert(out_data.end(), decoded_data.begin(), decoded_data.end());
+        return true;
+    }
+}
+
 // url can be
 // - http(s):// for remote files
 // - file:// for local files (only allowed if media_path is set)
@@ -1205,7 +1258,8 @@ json oaicompat_chat_params_parse(
             throw std::invalid_argument("Expected 'content' to be a string or an array");
         }
 
-        for (auto & p : content) {
+        for (size_t ci = 0; ci < content.size(); ci++) {
+            auto & p = content[ci];
             std::string type = json_value(p, "type", std::string());
             if (type == "image_url") {
                 if (!opt.allow_image) {
@@ -1243,14 +1297,43 @@ json oaicompat_chat_params_parse(
                 json input_video = json_value(p, "input_video", json::object());
                 std::string url  = json_value(input_video, "data",
                                         json_value(input_video, "url", std::string()));
-                handle_media(out_files, url, opt.media_path, false);
+
+                raw_buffer video_data;
+                if (!load_media_data(url, opt.media_path, video_data)) {
+                    throw std::runtime_error("Failed to load video");
+                }
+
+                bool has_audio = false;
+                std::vector<uint8_t> wav_buf;
+                if (opt.allow_audio && mtmd_helper::extract_audio_wav_from_video_buf(
+                        video_data.data(), video_data.size(),
+                        nullptr, 16000, wav_buf)) {
+                    has_audio = true;
+                    SRV_INF("extracted audio from video: %zu bytes of WAV\n", wav_buf.size());
+                } else if (opt.allow_audio) {
+                    SRV_WRN("%s", "failed to extract audio from video (no audio stream or ffmpeg error)\n");
+                }
+
+                out_files.push_back(std::move(video_data));
+                if (has_audio) {
+                    out_files.push_back(std::move(wav_buf));
+                }
 
                 p["type"] = "media_marker";
                 p["text"] = get_media_marker();
                 p.erase("input_video");
 
+                if (has_audio) {
+                    json audio_part = {
+                        {"type", "media_marker"},
+                        {"text", get_media_marker()}
+                    };
+                    content.insert(content.begin() + ci + 1, std::move(audio_part));
+                    ci++;
+                }
+
             } else if (type != "text") {
-                throw std::invalid_argument("unsupported content[].type");
+                throw std::invalid_argument("unsupported content[].type: '" + type + "'");
             }
         }
     }
