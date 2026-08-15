@@ -236,8 +236,15 @@ MTMD_API int32_t mtmd_helper_gen_audio_get_output(
 #ifdef __cplusplus
 #include <set>
 #include <memory>
+#include <vector>
 
 namespace mtmd_helper {
+
+// extract audio from a video buffer using ffmpeg, output as 16-bit mono WAV
+// returns true on success, false on failure (ffmpeg not found, no audio stream, etc.)
+// out_wav will be filled with the WAV data (header + PCM)
+bool extract_audio_wav_from_video_buf(const unsigned char * buf, size_t len,
+        const char * ffmpeg_bin_dir, int sample_rate, std::vector<uint8_t> & out_wav);
 
 //
 // C++ wrappers

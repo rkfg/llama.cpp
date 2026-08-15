@@ -540,6 +540,8 @@ struct mtmd_helper_video {
                 feeder.join();
             }
             if (alive) {
+                // reap the child (waitpid) so it does not linger as a zombie
+                subprocess_join(&proc, nullptr);
                 subprocess_destroy(&proc);
                 alive = false;
             }
@@ -739,9 +741,9 @@ struct mtmd_helper_video {
             size_t n = fread(frame_buf.data() + total_read, 1, frame_size - total_read, fp);
             if (n == 0) {
                 // clean EOF only if no bytes read yet; partial frame is an error
+                // keep sp.alive set so that stop() still reaps the exited child
                 LOG_DBG("%s: fread returned 0 after %zu/%zu bytes (ferror=%d)\n",
                         __func__, total_read, frame_size, ferror(fp));
-                sp.alive = false;
                 return nullptr;
             }
             total_read += n;
@@ -813,6 +815,114 @@ struct mtmd_helper_video {
     }
 };
 #endif
+
+//
+// Audio extraction from video buffers
+//
+
+#ifdef MTMD_VIDEO
+
+static std::string video_resolve_bin(const char * bin_dir, const char * name);
+
+// standalone subprocess handle for audio extraction (similar to mtmd_helper_video::subprocess_handle)
+struct audio_subprocess_handle {
+    struct subprocess_s proc = {};
+    bool alive = false;
+    std::thread feeder;
+
+    audio_subprocess_handle() = default;
+    audio_subprocess_handle(const audio_subprocess_handle &) = delete;
+    audio_subprocess_handle & operator=(const audio_subprocess_handle &) = delete;
+    ~audio_subprocess_handle() { stop(); }
+
+    void stop() {
+        if (alive) {
+            subprocess_terminate(&proc);
+        }
+        if (feeder.joinable()) {
+            feeder.join();
+        }
+        if (alive) {
+            // reap the child (waitpid) so it does not linger as a zombie
+            subprocess_join(&proc, nullptr);
+            subprocess_destroy(&proc);
+            alive = false;
+        }
+    }
+
+    FILE * stdout_pipe() {
+        return subprocess_stdout(&proc);
+    }
+
+    void start_feeder(const std::vector<uint8_t> & buf) {
+        feeder = std::thread([this, &buf]() {
+            FILE * f = subprocess_stdin(&proc);
+            if (!f) {
+                return;
+            }
+            fwrite(buf.data(), 1, buf.size(), f);
+            fclose(f);
+            proc.stdin_file = nullptr;
+        });
+    }
+};
+
+// extract audio stream from a video buffer using ffmpeg, output as 16-bit mono WAV to stdout
+// returns true on success, false on failure
+static bool extract_audio_wav_impl(const std::vector<uint8_t> & video_buf,
+        const std::string & ffmpeg_bin, int sample_rate, std::vector<uint8_t> & out_wav) {
+    char ar_buf[16];
+    snprintf(ar_buf, sizeof(ar_buf), "%d", sample_rate);
+    const char * cmd[] = {
+        ffmpeg_bin.c_str(),
+        "-nostdin",
+        "-i", "pipe:0",
+        "-vn",
+        "-acodec", "pcm_s16le",
+        "-ac", "1",
+        "-ar", ar_buf,
+        "-f", "wav",
+        "pipe:1",
+        "-loglevel", "error",
+        nullptr,
+    };
+
+    audio_subprocess_handle sp;
+    if (subprocess_create(cmd,
+            subprocess_option_search_user_path | subprocess_option_inherit_environment,
+            &sp.proc) != 0) {
+        LOG_ERR("%s: failed to launch ffmpeg for audio extraction\n", __func__);
+        return false;
+    }
+    sp.alive = true;
+    sp.start_feeder(video_buf);
+
+    // read all output
+    const size_t buf_size = 64 * 1024;
+    std::vector<char> read_buf(buf_size);
+    FILE * fp = sp.stdout_pipe();
+    while (true) {
+        size_t n = fread(read_buf.data(), 1, buf_size, fp);
+        if (n == 0) break;
+        out_wav.insert(out_wav.end(), (const uint8_t *)read_buf.data(), (const uint8_t *)read_buf.data() + n);
+    }
+
+    sp.stop();
+    return out_wav.size() > 44; // a valid WAV has at least a 44-byte header and some data
+}
+
+namespace mtmd_helper {
+
+bool extract_audio_wav_from_video_buf(const unsigned char * buf, size_t len,
+        const char * ffmpeg_bin_dir, int sample_rate, std::vector<uint8_t> & out_wav) {
+    std::vector<uint8_t> buf_vec(buf, buf + len);
+    std::string ffmpeg_bin = video_resolve_bin(ffmpeg_bin_dir, "ffmpeg");
+    return extract_audio_wav_impl(buf_vec, ffmpeg_bin, sample_rate, out_wav);
+}
+
+} // namespace mtmd_helper
+
+#endif // MTMD_VIDEO
 
 mtmd_helper_video_init_params mtmd_helper_video_init_params_default() {
     return {
