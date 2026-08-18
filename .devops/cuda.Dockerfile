@@ -29,7 +29,8 @@ FROM ${BASE_CUDA_DEV_CONTAINER} AS build
 
 ARG GCC_VERSION
 # CUDA architecture to build for (defaults to all supported archs)
-ARG CUDA_DOCKER_ARCH=default
+# Override for your GPU: 75=20xx, 80=V100/A100, 86=30xx/RTX A, 89=40xx, 120=50xx
+ARG CUDA_DOCKER_ARCH=120
 
 RUN apt-get update && \
     apt-get install -y gcc-${GCC_VERSION} g++-${GCC_VERSION} build-essential cmake python3 python3-pip git libssl-dev libgomp1
@@ -42,23 +43,22 @@ COPY . .
 
 COPY --from=web /app/tools/ui/dist tools/ui/dist
 
-RUN if [ "${CUDA_DOCKER_ARCH}" != "default" ]; then \
-    export CMAKE_ARGS="-DCMAKE_CUDA_ARCHITECTURES=${CUDA_DOCKER_ARCH}"; \
-    fi && \
-    cmake -B build -DGGML_NATIVE=OFF -DGGML_CUDA=ON -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON -DLLAMA_BUILD_TESTS=OFF ${CMAKE_ARGS} -DCMAKE_EXE_LINKER_FLAGS=-Wl,--allow-shlib-undefined . && \
-    cmake --build build --config Release -j$(nproc)
-
-RUN mkdir -p /app/lib && \
-    find build -name "*.so*" -exec cp -P {} /app/lib \;
-
-RUN mkdir -p /app/full \
-    && cp build/bin/* /app/full \
-    && cp *.py /app/full \
-    && cp -r conversion /app/full \
-    && cp -r gguf-py /app/full \
-    && cp -r requirements /app/full \
-    && cp requirements.txt /app/full \
-    && cp .devops/tools.sh /app/full/tools.sh
+RUN --mount=type=cache,target=build \
+    if [ "${CUDA_DOCKER_ARCH}" != "default" ]; then \
+        export CMAKE_ARGS="-DCMAKE_CUDA_ARCHITECTURES=${CUDA_DOCKER_ARCH}"; \
+        fi && \
+        rm -f build/CMakeCache.txt && \
+        cmake -B build -DGGML_NATIVE=OFF -DGGML_CUDA=ON -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON -DLLAMA_BUILD_TESTS=OFF ${CMAKE_ARGS} -DCMAKE_EXE_LINKER_FLAGS=-Wl,--allow-shlib-undefined . && \
+        cmake --build build --config Release -j$(nproc) && \
+        mkdir -p /app/lib /app/full && \
+        find build -name "*.so*" -exec cp -P {} /app/lib \; && \
+        cp build/bin/* /app/full/ && \
+        cp *.py /app/full/ && \
+        cp -r conversion /app/full/ && \
+        cp -r gguf-py /app/full/ && \
+        cp -r requirements /app/full/ && \
+        cp requirements.txt /app/full/ && \
+        cp .devops/tools.sh /app/full/tools.sh
 
 ## Base image
 FROM ${BASE_CUDA_RUN_CONTAINER} AS base
