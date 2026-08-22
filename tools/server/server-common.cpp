@@ -1258,6 +1258,7 @@ json oaicompat_chat_params_parse(
             throw std::invalid_argument("Expected 'content' to be a string or an array");
         }
 
+        json content_new = json::array();
         for (size_t ci = 0; ci < content.size(); ci++) {
             auto & p = content[ci];
             std::string type = json_value(p, "type", std::string());
@@ -1273,7 +1274,7 @@ json oaicompat_chat_params_parse(
                 p["type"] = "media_marker";
                 p["text"] = get_media_marker();
                 p.erase("image_url");
-
+                content_new.push_back(p);
             } else if (type == "input_audio") {
                 if (!opt.allow_audio) {
                     throw std::runtime_error("audio input is not supported - hint: if this is unexpected, you may need to provide the mmproj");
@@ -1282,13 +1283,13 @@ json oaicompat_chat_params_parse(
                 // note: don't need to validate "format", it's redundant
                 json input_audio = json_value(p, "input_audio", json::object());
                 std::string url  = json_value(input_audio, "data",
-                                        json_value(input_audio, "url", std::string()));
+                                         json_value(input_audio, "url", std::string()));
                 handle_media(out_files, url, opt.media_path, false);
 
                 p["type"] = "media_marker";
                 p["text"] = get_media_marker();
                 p.erase("input_audio");
-
+                content_new.push_back(p);
             } else if (type == "input_video") {
                 if (!opt.allow_video) {
                     throw std::runtime_error("video input is not supported - hint: if this is unexpected, you may need to provide the mmproj");
@@ -1296,7 +1297,7 @@ json oaicompat_chat_params_parse(
 
                 json input_video = json_value(p, "input_video", json::object());
                 std::string url  = json_value(input_video, "data",
-                                        json_value(input_video, "url", std::string()));
+                                         json_value(input_video, "url", std::string()));
 
                 raw_buffer video_data;
                 if (!load_media_data(url, opt.media_path, video_data)) {
@@ -1322,20 +1323,21 @@ json oaicompat_chat_params_parse(
                 p["type"] = "media_marker";
                 p["text"] = get_media_marker();
                 p.erase("input_video");
-
+                content_new.push_back(p);
                 if (has_audio) {
                     json audio_part = {
                         {"type", "media_marker"},
                         {"text", get_media_marker()}
                     };
-                    content.insert(content.begin() + ci + 1, std::move(audio_part));
-                    ci++;
+                    content_new.push_back(std::move(audio_part));
                 }
-
             } else if (type != "text") {
                 throw std::invalid_argument("unsupported content[].type: '" + type + "'");
+            } else {
+                content_new.push_back(p);
             }
         }
+        content = std::move(content_new);
     }
 
     auto caps = common_chat_templates_get_caps(opt.tmpls.get());

@@ -675,6 +675,12 @@ struct mtmd_helper_video {
         }
 
         cmd.push_back("-nostdin");
+        if (is_buf_input()) {
+            // cache: defaults read_ahead_limit to 64KB; moov-at-end MP4s need a
+            // larger read-ahead to reach the moov, so raise it to unlimited
+            cmd.push_back("-read_ahead_limit");
+            cmd.push_back("-1");
+        }
         cmd.push_back("-i");
         // cache:pipe:0 wraps stdin with a seekable in-memory cache, letting ffmpeg seek
         // backwards for container headers (e.g. MP4 moov atom at end of file)
@@ -876,7 +882,10 @@ static bool extract_audio_wav_impl(const std::vector<uint8_t> & video_buf,
     const char * cmd[] = {
         ffmpeg_bin.c_str(),
         "-nostdin",
-        "-i", "pipe:0",
+        // cache: defaults read_ahead_limit to 64KB; moov-at-end MP4s need a
+        // larger read-ahead to reach the moov, so raise it to unlimited
+        "-read_ahead_limit", "-1",
+        "-i", "cache:pipe:0",
         "-vn",
         "-acodec", "pcm_s16le",
         "-ac", "1",
